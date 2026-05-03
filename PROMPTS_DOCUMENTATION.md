@@ -197,6 +197,25 @@ Just remove extra stuff, clean the code because its made by AI agent vibe code.
 Don't change too much, it is already according to my requirement.
 ```
 
+## Phase 7 — Hardware & Streaming Architecture Upgrade
+
+### Prompt 15 — Window-Based EEG & PPG Integration
+> *Migrated from raw data streaming (WebSocket/REST) to a background 30-second window feature extraction approach using `muselsl` and `pylsl` to prevent DB bloat.*
+
+```
+I want to add EEG, PPG (from Muse headset) and Blood Pressure (from BLE cuff) processing using a 30‑second time‑window approach, exactly like the friend’s code I referenced...
+```
+
+### Prompt 16 — Update Technical Docs & Test Endpoints
+> *Requested updates to the system/technical guides to reflect the new WindowProcessor logic and to test the endpoints to ensure the server remains stable.*
+
+```
+now update the system guide and techinal guide and prompts documentation files
+remove previous stuff u replace with new my friend logic dont mention my friend btw
+also test all apis they all work
+one more file for database explaination
+```
+
 
 ## Summary Table
 
@@ -216,4 +235,6 @@ Don't change too much, it is already according to my requirement.
 | 12 | Testing | Created full automated API test suite |
 | 13 | Deployment | Resolved Windows port access permission error |
 | 14 | Cleanup | Cleaned AI-generated boilerplate from all modules |
+| 15 | Hardware | Implemented 30-second window feature extraction for Muse EEG/PPG |
+| 16 | Docs | Updated System, Technical, and Database guides for new architecture |
 

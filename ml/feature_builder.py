@@ -3,8 +3,6 @@
 import logging
 from typing import List
 
-from preprocessing.eeg_preprocessor import preprocess_eeg
-from preprocessing.bp_preprocessor import preprocess_bp
 from preprocessing.emotion_preprocessor import preprocess_emotions
 from scoring.questionnaire_scorer import get_stage_scores, score_student, score_teacher
 
@@ -39,19 +37,46 @@ def _get_teacher_workload(user_id: int, conn) -> dict:
     return defaults
 
 
-def _get_hr_mean(session_id: int, conn) -> float:
+def _get_window_aggregates(session_id: int, conn) -> dict:
+    defaults = {"stress_index": 0.0, "alpha_power": 0.0, "theta_power": 0.0, "hr_mean": 0.0}
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT AVG(CAST(pulse_rate AS FLOAT)) AS hr_avg FROM SensorData WHERE session_id = ? AND pulse_rate IS NOT NULL AND pulse_rate > 0",
-            (session_id,),
-        )
+        cursor.execute("""
+            SELECT AVG(stress_index), AVG(eeg_alpha), AVG(eeg_theta), AVG(ppg_hr)
+            FROM WindowAnalysis WHERE session_id = ?
+        """, (session_id,))
         row = cursor.fetchone()
-        if row and row.hr_avg is not None:
-            return round(float(row.hr_avg), 1)
+        if row and row[0] is not None:
+            defaults["stress_index"] = float(row[0] or 0.0)
+            defaults["alpha_power"] = float(row[1] or 0.0)
+            defaults["theta_power"] = float(row[2] or 0.0)
+            defaults["hr_mean"] = float(row[3] or 0.0)
     except Exception as exc:
-        logger.warning("HR mean query failed for session %d: %s", session_id, exc)
-    return 0.0
+        logger.warning("WindowAnalysis query failed for session %d: %s", session_id, exc)
+    return defaults
+
+def _get_bp_aggregates(session_id: int, conn) -> dict:
+    defaults = {"mean_sys": 0.0, "mean_dia": 0.0, "mean_pulse": 0.0}
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT baseline_sys, baseline_dia, baseline_pulse,
+                   after_sys, after_dia, after_pulse
+            FROM SessionBP WHERE session_id = ?
+        """, (session_id,))
+        row = cursor.fetchone()
+        if row:
+            # simple average of baseline and after if available
+            sys_vals = [x for x in [row[0], row[3]] if x]
+            dia_vals = [x for x in [row[1], row[4]] if x]
+            pul_vals = [x for x in [row[2], row[5]] if x]
+            
+            defaults["mean_sys"] = sum(sys_vals)/len(sys_vals) if sys_vals else 0.0
+            defaults["mean_dia"] = sum(dia_vals)/len(dia_vals) if dia_vals else 0.0
+            defaults["mean_pulse"] = sum(pul_vals)/len(pul_vals) if pul_vals else 0.0
+    except Exception as exc:
+        logger.warning("SessionBP query failed for session %d: %s", session_id, exc)
+    return defaults
 
 
 def _get_scores(session_id: int, user_id: int, role: str, conn):
@@ -83,10 +108,9 @@ def build_features(session_id: int, user_id: int, role: str, conn) -> List[float
     logger.info("Building feature vector: session=%d user=%d role=%s", session_id, user_id, role)
 
     q_scores, rf1, rf2, rf3 = _get_scores(session_id, user_id, role, conn)
-    eeg = preprocess_eeg(session_id, conn)
-    bp = preprocess_bp(session_id, conn)
+    win_agg = _get_window_aggregates(session_id, conn)
+    bp_agg = _get_bp_aggregates(session_id, conn)
     emo = preprocess_emotions(session_id, conn)
-    hr_mean = _get_hr_mean(session_id, conn)
 
     features = [
         q_scores["emotional_score"],
@@ -97,13 +121,13 @@ def build_features(session_id: int, user_id: int, role: str, conn) -> List[float
         float(rf1),
         float(rf2),
         float(rf3),
-        eeg["stress_index"],
-        eeg["alpha_power"],
-        eeg["theta_power"],
-        float(hr_mean),
-        float(bp["mean_systolic"] or 0.0),
-        float(bp["mean_diastolic"] or 0.0),
-        float(bp["mean_pulse"] or 0.0),
+        win_agg["stress_index"],
+        win_agg["alpha_power"],
+        win_agg["theta_power"],
+        win_agg["hr_mean"],
+        bp_agg["mean_sys"],
+        bp_agg["mean_dia"],
+        bp_agg["mean_pulse"],
         float(emo["emotion_distress_score"]),
     ]
 
@@ -114,10 +138,9 @@ def build_features(session_id: int, user_id: int, role: str, conn) -> List[float
 def get_all_component_scores(session_id: int, user_id: int, role: str, conn) -> dict:
     """Return all preprocessed component scores as a dict for saving to MH_Results."""
     q_scores, _, _, _ = _get_scores(session_id, user_id, role, conn)
-    eeg = preprocess_eeg(session_id, conn)
-    bp = preprocess_bp(session_id, conn)
+    win_agg = _get_window_aggregates(session_id, conn)
+    bp_agg = _get_bp_aggregates(session_id, conn)
     emo = preprocess_emotions(session_id, conn)
-    hr_mean = _get_hr_mean(session_id, conn)
 
     return {
         "emotional_score":       q_scores["emotional_score"],
@@ -126,13 +149,13 @@ def get_all_component_scores(session_id: int, user_id: int, role: str, conn) -> 
         "isolation_score":       q_scores["isolation_score"],
         "critical_score":        q_scores["critical_score"],
         "performance_score":     q_scores["performance_score"],
-        "eeg_stress_index":      eeg["stress_index"],
-        "eeg_alpha_power":       eeg["alpha_power"],
-        "eeg_theta_power":       eeg["theta_power"],
-        "hr_mean":               hr_mean,
-        "bp_avg_systolic":       bp["mean_systolic"],
-        "bp_avg_diastolic":      bp["mean_diastolic"],
-        "pulse_avg":             bp["mean_pulse"],
+        "eeg_stress_index":      win_agg["stress_index"],
+        "eeg_alpha_power":       win_agg["alpha_power"],
+        "eeg_theta_power":       win_agg["theta_power"],
+        "hr_mean":               win_agg["hr_mean"],
+        "bp_avg_systolic":       bp_agg["mean_sys"],
+        "bp_avg_diastolic":      bp_agg["mean_dia"],
+        "pulse_avg":             bp_agg["mean_pulse"],
         "dominant_emotion":      emo["dominant_emotion"],
         "emotion_distress_score": emo["emotion_distress_score"],
     }

@@ -213,6 +213,55 @@ END
 GO
 
 -- ============================================================
+-- TABLE: SessionBP
+-- ============================================================
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'SessionBP')
+BEGIN
+    CREATE TABLE SessionBP (
+        bp_id INT IDENTITY(1,1) PRIMARY KEY,
+        session_id INT NOT NULL FOREIGN KEY REFERENCES Sessions(session_id),
+        baseline_sys INT,
+        baseline_dia INT,
+        baseline_pulse INT,
+        baseline_time DATETIME2,
+        after_sys INT,
+        after_dia INT,
+        after_pulse INT,
+        after_time DATETIME2,
+        delta_sys INT,
+        delta_dia INT,
+        delta_pulse INT
+    );
+    PRINT 'Table SessionBP created.';
+END
+GO
+
+-- ============================================================
+-- TABLE: WindowAnalysis
+-- ============================================================
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WindowAnalysis')
+BEGIN
+    CREATE TABLE WindowAnalysis (
+        window_id INT IDENTITY(1,1) PRIMARY KEY,
+        session_id INT NOT NULL FOREIGN KEY REFERENCES Sessions(session_id),
+        window_start DATETIME2 NOT NULL,
+        window_end DATETIME2 NOT NULL,
+        eeg_delta FLOAT,
+        eeg_theta FLOAT,
+        eeg_alpha FLOAT,
+        eeg_beta FLOAT,
+        eeg_gamma FLOAT,
+        stress_index FLOAT,
+        ppg_hr FLOAT,
+        emotion_distress FLOAT,
+        questionnaire_score FLOAT,
+        window_risk FLOAT
+    );
+    PRINT 'Table WindowAnalysis created.';
+END
+GO
+
+-- ============================================================
 -- SEED DATA: Q_Stages (5 stages of the questionnaire)
 -- ============================================================
 IF NOT EXISTS (SELECT 1 FROM Q_Stages)

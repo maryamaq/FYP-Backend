@@ -14,9 +14,16 @@ from models.session_models import (
 from ml.feature_builder import build_features, get_all_component_scores
 from ml.predictor import predict
 from utils.time_utils import now_utc
+from hardware.bp_reader import find_bp_device, read_bp_once
+from signal_processing.lsl_stream import lsl_manager
+from signal_processing.window_processor import WindowProcessor
+from signal_processing.callbacks import get_closest_emotion, get_questionnaire_score
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/session", tags=["Sessions"])
+
+active_processors = {}
 
 # Maps ML recommendation labels → MH_Results.risk_class CHECK constraint values
 RECOMMENDATION_TO_RISK = {
@@ -158,12 +165,12 @@ def get_session(session_id: int):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found.")
 
         cursor.execute(
-            "SELECT COUNT(*) AS cnt FROM SensorData WHERE session_id = ? AND data_type = 'eeg'", (session_id,)
+            "SELECT COUNT(*) AS cnt FROM WindowAnalysis WHERE session_id = ?", (session_id,)
         )
         eeg_count = cursor.fetchone().cnt
 
         cursor.execute(
-            "SELECT COUNT(*) AS cnt FROM SensorData WHERE session_id = ? AND data_type = 'bp'", (session_id,)
+            "SELECT COUNT(*) AS cnt FROM SessionBP WHERE session_id = ?", (session_id,)
         )
         bp_count = cursor.fetchone().cnt
 
@@ -194,3 +201,85 @@ def get_session(session_id: int):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not retrieve session.")
     finally:
         conn.close()
+
+
+@router.post("/{session_id}/start_with_muse")
+async def start_session_with_muse(session_id: int):
+    # 1. Start the LSL Stream
+    try:
+        lsl_manager.start_stream()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # 2. Capture Baseline BP
+    baseline_result = {}
+    bp_addr = await find_bp_device(scan_timeout=10)
+    if bp_addr:
+        def on_bp(data): baseline_result.update(data)
+        await read_bp_once(bp_addr, on_bp)
+    
+    baseline_sys = baseline_result.get("systolic") or 120
+
+    # 3. Save Baseline to DB
+    conn = get_connection()
+    try:
+        conn.cursor().execute("""
+            INSERT INTO SessionBP (session_id, baseline_sys, baseline_dia, baseline_pulse, baseline_time)
+            VALUES (?, ?, ?, ?, ?)
+        """, (session_id, baseline_result.get("systolic"), baseline_result.get("diastolic"), 
+              baseline_result.get("pulse_rate"), datetime.now(timezone.utc)))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 4. Start 30-Second Window Processor
+    callbacks = {"get_emotion": get_closest_emotion, "get_q_score": get_questionnaire_score}
+    processor = WindowProcessor(session_id, lsl_manager, baseline_sys, callbacks)
+    processor.start()
+    
+    active_processors[session_id] = processor
+    return {"message": "Muse Stream started, Baseline BP captured, Window processing running."}
+
+
+@router.post("/{session_id}/end_with_muse")
+async def end_session_with_muse(session_id: int):
+    # 1. Stop Processor
+    processor = active_processors.pop(session_id, None)
+    if processor:
+        processor.stop()
+
+    # 2. Stop LSL Stream
+    lsl_manager.stop_stream()
+
+    # 3. Capture After-Session BP
+    after_result = {}
+    bp_addr = await find_bp_device(scan_timeout=10)
+    if bp_addr:
+        def on_bp(data): after_result.update(data)
+        await read_bp_once(bp_addr, on_bp)
+
+    # 4. Save to DB and calculate Delta
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT baseline_sys, baseline_dia, baseline_pulse FROM SessionBP WHERE session_id = ?", (session_id,))
+        row = c.fetchone()
+        
+        if row and after_result.get("systolic"):
+            d_sys = after_result["systolic"] - row[0] if row[0] else None
+            d_dia = after_result["diastolic"] - row[1] if row[1] else None
+            d_pul = after_result["pulse_rate"] - row[2] if row[2] else None
+
+            c.execute("""
+                UPDATE SessionBP SET 
+                    after_sys=?, after_dia=?, after_pulse=?, after_time=?,
+                    delta_sys=?, delta_dia=?, delta_pulse=?
+                WHERE session_id=?
+            """, (after_result.get("systolic"), after_result.get("diastolic"), after_result.get("pulse_rate"), 
+                  datetime.now(timezone.utc), d_sys, d_dia, d_pul, session_id))
+            conn.commit()
+    finally:
+        conn.close()
+
+    return {"message": "Session ended, BP deltas saved, LSL stopped."}
+
