@@ -137,28 +137,6 @@ BEGIN
 END
 GO
 
--- ============================================================
--- TABLE: SensorData
--- ============================================================
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'SensorData')
-BEGIN
-    CREATE TABLE SensorData (
-        sensor_id           INT IDENTITY(1,1) PRIMARY KEY,
-        session_id          INT          NOT NULL REFERENCES Sessions(session_id),
-        eeg_value           FLOAT        NULL,
-        ppg_value           FLOAT        NULL,
-        bp_systolic         INT          NULL,
-        bp_diastolic        INT          NULL,
-        pulse_rate          INT          NULL,
-        emotion             VARCHAR(50)  NULL,
-        emotion_confidence  FLOAT        NULL,
-        data_type           VARCHAR(20)  NOT NULL
-                            CHECK (data_type IN ('eeg', 'ppg', 'bp', 'emotion')),
-        recorded_at         DATETIME     NOT NULL DEFAULT GETDATE()
-    );
-    PRINT 'Table SensorData created.';
-END
-GO
 
 -- ============================================================
 -- TABLE: FacialEmotions
