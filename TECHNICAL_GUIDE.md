@@ -46,7 +46,10 @@ If the examiner asks: *"Explain exactly what happens when the user clicks 'Start
 While the user is answering the questionnaire on their phone, the background thread is running:
 1. It sleeps for 30 seconds, letting the `muselsl` hardware buffers fill up.
 2. It wakes up and pulls the 30 seconds of raw EEG and PPG data using `pylsl.pull_chunk()`.
-3. It passes the raw array to `extractors.py` which uses NumPy's FFT to calculate the `stress_index = (Beta + Theta) / Alpha` and the peak `ppg_hr`.
+3. **The Mathematics (How we compress 7,680 rows into 1 row):** It passes the raw array to `extractors.py`. In 30 seconds at 256Hz, the Muse collects 7,680 raw voltage readings per channel. Instead of saving raw voltages (the Time Domain), we use **NumPy's FFT (Fast Fourier Transform)** to convert the data into the **Frequency Domain**. 
+   - FFT reveals the "Power Spectral Density"—showing how much energy is in specific brainwave frequencies.
+   - We extract just 5 numbers: Delta (1-4Hz), Theta (4-8Hz), Alpha (8-13Hz), Beta (13-30Hz), and Gamma (30-50Hz).
+   - From this, we calculate a single mathematical `stress_index = (Beta + Theta) / Alpha` and use FFT again to find the peak `ppg_hr` (Heart Rate).
 4. It queries the database for the most recent distress score logged by the camera.
 5. It `INSERT`s exactly one summarized row into the `WindowAnalysis` table.
 
