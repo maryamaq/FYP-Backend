@@ -58,7 +58,7 @@ def get_user_history(user_id: int):
                 0.0 as confidence,
                 r.calculated_at
             FROM Sessions s
-            INNER JOIN MH_Results r ON s.session_id = r.session_id
+            LEFT JOIN MH_Results r ON s.session_id = r.session_id
             WHERE s.user_id = ?
             ORDER BY s.start_time DESC
             """,

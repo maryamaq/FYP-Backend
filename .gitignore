@@ -6,3 +6,6 @@ __pycache__/
 frontend/
 emotion_images/
 ml/dataset/
+SYSTEM_GUIDE.md
+TECHNICAL_GUIDE.md
+questionaire and camera working.txt
