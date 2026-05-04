@@ -1,5 +1,15 @@
-"""ml/feature_builder.py — Assembles the 16-element feature vector for ML prediction"""
-
+# ============================================================
+# ml/feature_builder.py — ML Feature Extraction Pipeline
+#
+# Pulls data from:
+#  - Q_Responses (Questionnaire answers)
+#  - WindowAnalysis (30-second EEG stress index & PPG heart rate)
+#  - SessionBP (Blood pressure deltas)
+#  - FacialEmotions (Distress score)
+#
+# Assembles exactly 16 floating-point features expected by the 
+# Random Forest / Gradient Boosting predictors.
+# ============================================================
 import logging
 from typing import List
 

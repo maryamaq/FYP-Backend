@@ -1,5 +1,12 @@
-"""routers/sessions.py — Session management endpoints"""
-
+# ============================================================
+# routers/sessions.py — Core Session Lifecycle Management
+#
+# Handles:
+#  - Starting/Ending clinical assessment sessions
+#  - Launching the background WindowProcessor for 30-sec hardware analysis
+#  - Calling the ML prediction pipeline at session end
+#  - Inserting final results into MH_Results
+# ============================================================
 import logging
 from fastapi import APIRouter, HTTPException, status
 

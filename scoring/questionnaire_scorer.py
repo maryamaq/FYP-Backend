@@ -1,5 +1,11 @@
-"""scoring/questionnaire_scorer.py — Questionnaire score calculator"""
-
+# ============================================================
+# scoring/questionnaire_scorer.py — Questionnaire Score Calculator
+#
+# Processes the stage-by-stage responses from Q_Responses.
+# Computes the 5 component scores (emotional, functional, context, 
+# isolation, critical).
+# Called by ml/feature_builder.py to build the ML feature vector.
+# ============================================================
 import logging
 from typing import Dict
 

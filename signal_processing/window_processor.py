@@ -1,3 +1,15 @@
+# ============================================================
+# signal_processing/window_processor.py — Real-time Hardware Integration
+#
+# This is the core engine for hardware data collection. 
+# It runs a background thread that wakes up every 30 seconds to:
+#  1. Pull exactly 30 seconds of accumulated EEG/PPG chunks from LSL
+#  2. Extract Alpha, Beta, Theta, Delta, Gamma frequency powers
+#  3. Compute an EEG stress_index and a PPG heart rate
+#  4. Fetch the latest Facial Emotion and Questionnaire score
+#  5. Calculate a composite `window_risk` and save ONE row to WindowAnalysis
+# ============================================================
+
 import threading
 import time
 import logging

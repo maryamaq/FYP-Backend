@@ -168,26 +168,8 @@ def analyze_emotion(payload: EmotionRequest):
     except Exception as exc:
         logger.warning("Could not save emotion image: %s", exc)
 
-    # Insert into EmotionImages
+    # Skip EmotionImages (table was removed)
     conn = get_connection()
-    image_id = None
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO EmotionImages (user_id, session_id, stage_number, image_name, captured_at)
-            OUTPUT INSERTED.image_id
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (payload.user_id, payload.session_id, payload.stage_number, image_name, captured_at),
-        )
-        row = cursor.fetchone()
-        if row:
-            image_id = row[0]
-        conn.commit()
-    except Exception as exc:
-        conn.rollback()
-        logger.warning("EmotionImages insert failed: %s", exc)
 
     # Try custom model, fall back to DeepFace
     dominant_emotion, emotion_scores, confidence = _predict_with_custom_model(frame)
@@ -212,15 +194,15 @@ def analyze_emotion(payload: EmotionRequest):
             """
             INSERT INTO FacialEmotions
                 (session_id, dominant_emotion, happy, sad, angry, fear, surprise, disgust, neutral,
-                 captured_at, image_id, stage_number)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 captured_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.session_id, dominant_emotion,
                 scores.get("happy", 0.0), scores.get("sad", 0.0), scores.get("angry", 0.0),
                 scores.get("fear", 0.0), scores.get("surprise", 0.0), scores.get("disgust", 0.0),
                 scores.get("neutral", 0.0),
-                captured_at, image_id, payload.stage_number,
+                captured_at,
             ),
         )
         conn.commit()

@@ -1,5 +1,13 @@
-"""ml/predictor.py — Load saved models and make predictions"""
-
+# ============================================================
+# ml/predictor.py — Machine Learning Inference
+#
+# Loads pre-trained scikit-learn models (model_student.pkl, 
+# model_teacher.pkl) from disk.
+# Takes the 16-element feature vector and predicts a Risk Class 
+# along with confidence probabilities.
+#
+# Falls back to simple rule-based weighting if .pkl files are missing.
+# ============================================================
 import os
 import logging
 from typing import Dict, List

@@ -1,9 +1,13 @@
 # ============================================================
 # preprocessing/eeg_preprocessor.py — EEG signal preprocessing
 #
-# Loads raw EEG data from SensorData, applies bandpass filtering,
-# extracts frequency band powers (delta, theta, alpha, beta),
-# and computes a stress index.
+# [DEPRECATED - OLD PIPELINE]
+# Loads raw EEG data from SensorData (which has been removed), 
+# applies bandpass filtering, extracts frequency band powers.
+#
+# This file is entirely replaced by the new real-time 30-second 
+# window background thread located at:
+# signal_processing/window_processor.py
 # ============================================================
 
 import logging
@@ -81,6 +85,9 @@ def compute_band_power(
 
 def preprocess_eeg(session_id: int, conn) -> Dict[str, float]:
     """
+    [DEPRECATED: This approach processed all SensorData at the end of the session. 
+     We now use the 30-second window approach via signal_processing/window_processor.py]
+    
     Load raw EEG data for a session, filter it, extract frequency band
     powers, and compute a stress index.
 

@@ -1,9 +1,11 @@
 # ============================================================
 # scoring/risk_engine.py — Mental Health Risk Score Calculator
 #
-# Called by POST /session/end after the session is marked complete.
-# Reads all collected data for the session and produces a single
-# final_score + risk_class, which is saved to MH_Results.
+# [DEPRECATED - OLD RULE-BASED ENGINE]
+# This file was the old hardcoded math formula for calculating 
+# the risk score. It has been completely replaced by the Machine 
+# Learning prediction pipeline located at:
+# ml/predictor.py  and  ml/feature_builder.py
 # ============================================================
 
 import logging
