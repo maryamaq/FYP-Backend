@@ -3,7 +3,7 @@
 # ============================================================
 
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime
 
 
@@ -34,8 +34,10 @@ class EndSessionResponse(BaseModel):
     recommendation: str      # 'Normal' | 'Calm Down' | 'See Psychologist' | 'Emergency'
     referral_note: Optional[str] = None
     final_score: float
-    confidence: float        # Model prediction confidence 0.0–1.0
+    confidence: float        # not computed, always 0.0
     ended_at: datetime
+    risk_class: Optional[str] = None                 # stored label, e.g. 'Healthy'
+    missing_modalities: List[str] = []               # signals that were not measured
 
 
 class SessionDetailResponse(BaseModel):

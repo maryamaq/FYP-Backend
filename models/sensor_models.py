@@ -2,7 +2,7 @@
 # models/sensor_models.py — Pydantic schemas for sensor data
 # ============================================================
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, Dict
 from datetime import datetime
 
@@ -14,7 +14,7 @@ class PulseRequest(BaseModel):
     """
 
     session_id: int
-    pulse_rate: float
+    pulse_rate: float = Field(ge=30, le=220)
     source: str = "muse"  # 'muse' | 'bp_machine'
 
 
@@ -31,9 +31,15 @@ class BPRequest(BaseModel):
     """Request body for POST /sensors/bp."""
 
     session_id: int
-    systolic: int
-    diastolic: int
-    pulse_rate: Optional[int] = None   # BLE BP machines often include pulse
+    systolic: int = Field(ge=60, le=260)
+    diastolic: int = Field(ge=30, le=160)
+    pulse_rate: Optional[int] = Field(default=None, ge=30, le=220)   # BP machines often include pulse
+
+    @model_validator(mode="after")
+    def diastolic_below_systolic(self):
+        if self.diastolic >= self.systolic:
+            raise ValueError("diastolic must be lower than systolic")
+        return self
 
 
 class BPResponse(BaseModel):
@@ -56,7 +62,7 @@ class EmotionRequest(BaseModel):
 
     session_id: int
     user_id: int
-    stage_number: int = 1
+    stage_number: int = Field(default=1, ge=1, le=5)   # ignored for storage: the server derives the stage
     question_id: Optional[int] = None
     image_base64: str
 

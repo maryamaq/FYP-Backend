@@ -22,3 +22,11 @@ ml/dataset/
 SYSTEM_GUIDE.md
 TECHNICAL_GUIDE.md
 questionaire and camera working.txt
+.agents/
+.kiro/
+PROMPTS/
+tests/
+database/demo_*.sql
+database/integrity_checks.sql
+processing/appointments.py
+routers/appointments.py

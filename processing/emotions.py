@@ -3,6 +3,8 @@
 import logging
 from collections import Counter
 
+from processing.scorer import MIN_FACE_SAMPLES
+
 logger = logging.getLogger(__name__)
 
 # Distress map: 0.0 = no distress, 1.0 = maximum distress
@@ -12,45 +14,46 @@ DISTRESS_MAP = {
     "angry": 0.8, "undetected": 0.3,
 }
 
+EMOTION_COLUMNS = ("happy", "sad", "angry", "fear", "surprise", "disgust", "neutral")
 
-def preprocess_emotions(session_id: int, conn) -> dict:
+
+def preprocess_emotions(session_id: int, conn):
     """
-    Aggregate all FacialEmotions for a session.
+    Aggregate the usable FacialEmotions rows of a session.
 
-    Returns:
+    A row is usable when a face was detected: the label is not 'undetected' and the
+    seven emotion scores are not all 0 (old rows saved by the previous fallback).
+
+    Returns None when fewer than MIN_FACE_SAMPLES usable rows exist (face not measured).
+    Otherwise:
         {dominant_emotion, face_distress, face_score}
-        face_distress = mean of DISTRESS_MAP values across all captures
+        face_distress = mean of DISTRESS_MAP values across the usable captures
         face_score = face_distress * 4   (normalized to 0-4 scale)
+    Database errors are not hidden: they propagate to the caller.
     """
-    defaults = {"dominant_emotion": "neutral", "face_distress": 0.1, "face_score": 0.4}
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT dominant_emotion FROM FacialEmotions "
-            "WHERE session_id = ? ORDER BY captured_at ASC", (session_id,)
-        )
-        rows = cursor.fetchall()
-        if not rows:
-            logger.info("No emotion data for session %d.", session_id)
-            return defaults
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT dominant_emotion, happy, sad, angry, fear, surprise, disgust, neutral "
+        "FROM FacialEmotions WHERE session_id = ? ORDER BY captured_at ASC", (session_id,)
+    )
+    labels = []
+    for row in cursor.fetchall():
+        label = (row.dominant_emotion or "").lower()
+        scores = [getattr(row, col) or 0.0 for col in EMOTION_COLUMNS]
+        if label == "" or label == "undetected" or not any(scores):
+            continue
+        labels.append(label)
 
-        labels = [(r.dominant_emotion or "neutral").lower() for r in rows]
-        # Filter out 'undetected' if any actual emotion was detected
-        valid_labels = [l for l in labels if l != "undetected"]
-        if not valid_labels:
-            valid_labels = ["neutral"]
+    if len(labels) < MIN_FACE_SAMPLES:
+        logger.info("Face not measured for session %d (%d usable captures).", session_id, len(labels))
+        return None
 
-        distress_values = [DISTRESS_MAP.get(lbl, 0.1) for lbl in valid_labels]
-        face_distress = sum(distress_values) / len(distress_values)
+    distress_values = [DISTRESS_MAP.get(lbl, 0.1) for lbl in labels]
+    face_distress = sum(distress_values) / len(distress_values)
+    counts = Counter(labels)
+    dominant = max(counts, key=counts.get)
 
-        counts = Counter(valid_labels)
-        dominant = max(counts, key=counts.get)
-        face_score = face_distress * 4.0
-
-        logger.info("Emotions session %d: dominant=%s distress=%.3f", session_id, dominant, face_distress)
-        return {"dominant_emotion": dominant,
-                "face_distress": round(face_distress, 4),
-                "face_score": round(face_score, 4)}
-    except Exception as exc:
-        logger.exception("Emotion preprocessing failed for session %d: %s", session_id, exc)
-        return defaults
+    logger.info("Emotions session %d: usable=%d distress=%.3f", session_id, len(labels), face_distress)
+    return {"dominant_emotion": dominant,
+            "face_distress": round(face_distress, 4),
+            "face_score": round(face_distress * 4.0, 4)}

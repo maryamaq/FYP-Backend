@@ -12,14 +12,28 @@ class ScoreBreakdown(BaseModel):
     context: float = 0.0
     isolation: float = 0.0
     critical: Optional[float] = None
-    questionnaire_score: float = 0.0
-    physio_score: float = 0.0
-    eeg_stress_index: float = 0.0
-    hr_mean: float = 0.0
+    # None = not measured / not available (never 0)
+    questionnaire_score: Optional[float] = None
+    physio_score: Optional[float] = None
+    eeg_stress_index: Optional[float] = None
+    hr_mean: Optional[float] = None
     bp_avg_systolic: Optional[float] = None
     bp_systolic_delta: Optional[float] = None
     dominant_emotion: Optional[str] = None
     emotion_distress: float = 0.0
+
+
+class UnreliableModality(BaseModel):
+    """A signal whose stored value cannot be trusted, with the reason."""
+    name: str
+    reason: str
+
+
+class AppointmentInfo(BaseModel):
+    """The psychologist appointment linked to a session."""
+    appointment_id: int
+    psychologist_name: str
+    status: str
 
 
 class SessionResult(BaseModel):
@@ -34,6 +48,13 @@ class SessionResult(BaseModel):
     score_breakdown: ScoreBreakdown
     session_duration_minutes: Optional[float] = None
     calculated_at: Optional[datetime] = None
+    # Added fields (older apps simply ignore them)
+    tier: str = "Low"                                   # Low | Medium | High (display only)
+    missing_modalities: List[str] = []                  # signals that were not measured
+    unreliable_modalities: List[UnreliableModality] = []
+    advisor_notified: bool = False
+    appointment: Optional[AppointmentInfo] = None
+    legacy: bool = False                                # saved before the data checks existed
 
 
 class UserHistoryItem(BaseModel):
@@ -50,3 +71,6 @@ class UserHistory(BaseModel):
     """Ordered list of past sessions for a user."""
     user_id: int
     sessions: List[UserHistoryItem]
+    # None = no completed assessment yet (never a made-up date)
+    next_due_date: Optional[datetime] = None
+    due_status: Optional[str] = None                    # e.g. "due now" / "due in 5 days"

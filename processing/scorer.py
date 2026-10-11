@@ -12,6 +12,24 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ── Rule for signals that were not measured ───────────────────
+# A physiological signal with too little data is left out (never replaced by 0
+# or a made-up value). The remaining physio weights are rescaled to add up to 1.
+# If NO physiological signal was measured: final = NO_PHYSIO_Q_WEIGHT * q_score.
+# (Set it to 1.0 to score on the questionnaire alone in that case.)
+NO_PHYSIO_Q_WEIGHT = 0.70
+
+# Minimum amount of real data before a signal counts as "measured"
+MIN_EEG_SNAPSHOTS = 5      # about 10 seconds of EEG
+MIN_FACE_SAMPLES = 3       # face images with a detected face
+MIN_HR_READINGS = 3        # PPG pulse readings
+MIN_BP_READINGS = 2        # two systolic readings are needed for a change
+HR_MIN_BPM = 40            # pulse values outside 40-200 are not real readings
+HR_MAX_BPM = 200
+
+# Physiological weights (same numbers as calc_physio_score)
+PHYSIO_WEIGHTS = {"eeg": 0.40, "face": 0.25, "hr": 0.20, "bp": 0.15}
+
 
 # ── Stage score normalization ──────────────────────────────────
 
@@ -39,41 +57,8 @@ def get_stage_scores(session_id: int, conn) -> dict:
 
 # ── Questionnaire scoring formulas ─────────────────────────────
 
-def get_feedback_weights(conn) -> dict:
-    """Read average psychologist feedback ratings per stage and convert to weights.
-
-    Psychologists rate 1-5 stars. Higher rating = this stage is more important.
-    Returns a dict {stage_number: weight} normalized so they sum to 1.0.
-    Falls back to default weights if no feedback exists yet.
-    """
-    defaults = {1: 0.30, 2: 0.20, 3: 0.10, 4: 0.15, 5: 0.05}
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT q.stage_id, AVG(CAST(f.usefulness_score AS FLOAT)) as avg_rating "
-            "FROM QuestionFeedback f "
-            "JOIN Q_Questions q ON f.question_id = q.question_id "
-            "GROUP BY q.stage_id"
-        )
-        rows = cursor.fetchall()
-        if not rows:
-            return defaults
-
-        raw = {}
-        for row in rows:
-            raw[int(row.stage_id)] = float(row.avg_rating)
-
-        # Fill missing stages with default rating of 3
-        for stage in range(1, 6):
-            if stage not in raw:
-                raw[stage] = 3.0
-
-        total = sum(raw.values())
-        return {s: round(v / total, 4) for s, v in raw.items()}
-    except Exception as exc:
-        logger.warning("Could not load feedback weights, using defaults: %s", exc)
-        return defaults
-
+# Psychologist feedback (QuestionFeedback) is only stored for human review.
+# It never changes these weights.
 
 def calc_student_score(stages: dict, cgpa_trend: float = 0.0,
                        attendance_drop: float = 0.0,
@@ -136,6 +121,67 @@ def calc_physio_score(eeg_score: float = 0.0, face_score: float = 0.0,
 def fuse_scores(q_score: float, physio_score: float) -> float:
     """Fuse questionnaire and physiological scores. 70/30 split."""
     return round(0.70 * q_score + 0.30 * physio_score, 4)
+
+
+def hr_score(avg_hr: float) -> float:
+    """Heart-rate stress score (0-4): 0 at 72 bpm, +1 per 10 bpm above."""
+    return min(4.0, max(0.0, (avg_hr - 72.0) / 10.0))
+
+
+def bp_score(systolic_delta: float) -> float:
+    """Blood-pressure stress score (0-4): +1 per 10 mmHg rise in systolic."""
+    return min(4.0, max(0.0, systolic_delta / 10.0))
+
+
+def get_heart_rate(session_id: int, conn):
+    """Average pulse from real PPG readings (40-200 bpm), or None if fewer than MIN_HR_READINGS."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) AS n, AVG(CAST(pulse_rate AS FLOAT)) AS avg_hr FROM SensorData "
+        "WHERE session_id = ? AND data_type = 'ppg' AND pulse_rate BETWEEN ? AND ?",
+        (session_id, HR_MIN_BPM, HR_MAX_BPM)
+    )
+    row = cursor.fetchone()
+    if row is None or row.n < MIN_HR_READINGS:
+        return None
+    return float(row.avg_hr)
+
+
+def get_bp_change(session_id: int, conn):
+    """Systolic readings of a session as {first_systolic, delta}, or None if fewer than MIN_BP_READINGS."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT bp_systolic FROM SensorData "
+        "WHERE session_id = ? AND data_type = 'bp' AND bp_systolic IS NOT NULL "
+        "ORDER BY recorded_at ASC, sensor_id ASC",
+        (session_id,)
+    )
+    rows = cursor.fetchall()
+    if len(rows) < MIN_BP_READINGS:
+        return None
+    first = int(rows[0].bp_systolic)
+    last = int(rows[-1].bp_systolic)
+    return {"first_systolic": first, "delta": last - first}
+
+
+def fuse_with_missing(q_score: float, signals: dict) -> dict:
+    """Final score when some physiological signals may be missing.
+
+    signals = {"eeg": score or None, "face": ..., "hr": ..., "bp": ...} (0-4 scores).
+    A signal that is None was not measured: it is left out and the others are
+    rescaled. With all four present this gives the same result as
+    fuse_scores(q_score, calc_physio_score(...)).
+    Returns {"physio": float or None, "final": float, "missing_modalities": [names]}.
+    """
+    available = {name: score for name, score in signals.items() if score is not None}
+    missing = [name for name in PHYSIO_WEIGHTS if name not in available]
+    if not available:
+        return {"physio": None, "final": round(NO_PHYSIO_Q_WEIGHT * q_score, 4),
+                "missing_modalities": missing}
+    weight_sum = sum(PHYSIO_WEIGHTS[name] for name in available)
+    physio = sum(PHYSIO_WEIGHTS[name] * available[name] for name in available) / weight_sum
+    physio = round(min(4.0, max(0.0, physio)), 4)
+    return {"physio": physio, "final": fuse_scores(q_score, physio), "missing_modalities": missing}
 
 
 def classify(final_score: float) -> str:

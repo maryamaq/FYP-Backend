@@ -3,12 +3,13 @@
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from database import get_connection
 from models.questionnaire_models import (
     SubmitStageRequest, SubmitStageResponse, StageInfo, QuestionInfo,
 )
+from utils.auth_utils import get_current_user, require_role
 from utils.time_utils import now_utc
 
 logger = logging.getLogger(__name__)
@@ -18,30 +19,60 @@ MAX_STAGES = 5
 
 
 @router.post("/submit", response_model=SubmitStageResponse)
-def submit_stage(payload: SubmitStageRequest):
-    """Submit answers for one questionnaire stage."""
+def submit_stage(payload: SubmitStageRequest,
+                 current_user: dict = Depends(require_role("student", "teacher"))):
+    """Submit answers for one questionnaire stage (only into your own session)."""
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT session_id FROM Sessions WHERE session_id = ?", (payload.session_id,))
-        if not cursor.fetchone():
+
+        # 1. Lock the session row first: checks the owner and makes two quick taps on
+        #    "Submit" run one after the other (the second one then sees the stored rows).
+        cursor.execute("SELECT user_id, end_time FROM Sessions WITH (UPDLOCK, HOLDLOCK) WHERE session_id = ?",
+                       (payload.session_id,))
+        session_row = cursor.fetchone()
+        if not session_row or session_row.user_id != current_user["user_id"]:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
-
-        now = now_utc()
-        cursor.executemany("""
-            INSERT INTO Q_Responses (session_id, question_id, stage_number, response_choice, cal_score, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            [(payload.session_id, a.question_id, payload.stage_number, str(a.response_choice), a.cal_score, now)
-             for a in payload.answers])
-
-        total_score = sum(a.cal_score for a in payload.answers)
+        if session_row.end_time is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Session already ended.")
 
         cursor.execute("SELECT threshold FROM Q_Stages WHERE stage_number = ?", (payload.stage_number,))
         stage_row = cursor.fetchone()
         if not stage_row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Stage {payload.stage_number} not found.")
 
-        conn.commit()
+        # 2. Stage already submitted for this session: do not insert again, answer from the stored rows.
+        cursor.execute("SELECT cal_score FROM Q_Responses WHERE session_id = ? AND stage_number = ?",
+                       (payload.session_id, payload.stage_number))
+        stored_rows = cursor.fetchall()
+        if stored_rows:
+            total_score = sum(r.cal_score for r in stored_rows)
+            conn.rollback()   # nothing to save; releases the session lock
+        else:
+            # 3. The answers must be exactly the questions of this stage for this role (no repeats, none missing).
+            cursor.execute("""
+                SELECT q.question_id, q.weight
+                FROM Q_Questions q INNER JOIN Q_Stages s ON q.stage_id = s.stage_id
+                WHERE s.stage_number = ? AND (s.target_role = ? OR s.target_role = 'both')""",
+                (payload.stage_number, current_user["role"]))
+            weights = {r.question_id: r.weight for r in cursor.fetchall()}
+            sent_ids = [a.question_id for a in payload.answers]
+            if len(sent_ids) != len(set(sent_ids)):
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                    detail="Each question must be answered only once.")
+            if set(sent_ids) != set(weights):
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                    detail="Answers must be exactly the questions of this stage.")
+
+            # 4. The server calculates the score (the client cal_score is ignored).
+            now = now_utc()
+            rows = [(payload.session_id, a.question_id, payload.stage_number, str(a.response_choice),
+                     a.response_choice * weights[a.question_id], now) for a in payload.answers]
+            cursor.executemany("""
+                INSERT INTO Q_Responses (session_id, question_id, stage_number, response_choice, cal_score, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)""", rows)
+            total_score = sum(row[4] for row in rows)
+            conn.commit()
         passed = total_score >= stage_row.threshold
 
         if passed and payload.stage_number < MAX_STAGES:
@@ -69,7 +100,7 @@ def submit_stage(payload: SubmitStageRequest):
 
 
 @router.get("/stages", response_model=List[StageInfo])
-def get_stages():
+def get_stages(current_user: dict = Depends(get_current_user)):
     """Return all questionnaire stages."""
     conn = get_connection()
     try:
@@ -85,7 +116,8 @@ def get_stages():
 
 
 @router.get("/questions/{stage_number}", response_model=List[QuestionInfo])
-def get_questions(stage_number: int, role: Optional[str] = Query(None, description="Filter: student or teacher")):
+def get_questions(stage_number: int, role: Optional[str] = Query(None, description="Filter: student or teacher"),
+                  current_user: dict = Depends(get_current_user)):
     """Return questions for a stage, optionally filtered by role."""
     conn = get_connection()
     try:

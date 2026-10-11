@@ -1,13 +1,16 @@
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from database import get_connection
+from utils.auth_utils import require_role, require_same_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/advisor", tags=["Advisor"])
 
 @router.get("/{advisor_id}/students")
-def get_advisor_students(advisor_id: int):
-    """Get all medium stress students assigned to this advisor via notifications."""
+def get_advisor_students(advisor_id: int,
+                         current_user: dict = Depends(require_role("advisor"))):
+    """Get all medium stress students assigned to this advisor via notifications (only your own list)."""
+    require_same_user(current_user, advisor_id)
     conn = get_connection()
     try:
         cursor = conn.cursor()

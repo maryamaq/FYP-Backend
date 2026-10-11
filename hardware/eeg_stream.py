@@ -13,6 +13,8 @@ RAW DATA PIPELINE (what exactly happens to each sample):
   7. Snapshot saved to EEG_Snapshots every 2 seconds, tagged with current question number.
   8. WebSocket broadcasts live values to the Flutter app every 2 seconds.
   9. PPG (IR optical channel) → peak detection → real Heart Rate BPM → saved to SensorData.
+     If no believable pulse can be measured, the pulse is None and nothing is saved for it.
+ 10. If no EEG stream is found the status is "no_device" and NOTHING is written to the database.
 """
 
 import threading
@@ -24,6 +26,8 @@ from typing import Optional
 
 import numpy as np
 from scipy.signal import butter, sosfilt, find_peaks
+
+from database import get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -115,36 +119,55 @@ def _process_eeg(raw: np.ndarray) -> Optional[dict]:
     }
 
 
-def _extract_pulse(ppg_ir: np.ndarray) -> int:
+def _extract_pulse(ppg_ir: np.ndarray) -> Optional[int]:
     """
     Extract heart rate (BPM) from Muse PPG IR optical channel.
     Bandpass 0.8–3.5 Hz (48–210 BPM), then count peaks.
+    Returns None when no believable pulse can be measured (never a made-up default).
     """
     try:
         if len(ppg_ir) < 64:
-            return 72
+            return None
         filtered = _bandpass(ppg_ir, 0.8, 3.5, fs=PPG_RATE)
         peaks, _ = find_peaks(filtered, distance=int(PPG_RATE * 0.4))
         if len(peaks) >= 2:
             intervals = np.diff(peaks) / PPG_RATE
             bpm = int(round(60.0 / float(np.mean(intervals))))
-            return max(45, min(180, bpm))
+            if 40 <= bpm <= 200:
+                return bpm
     except Exception:
         pass
-    return 72
+    return None
 
 
 # ── EEGStream class ───────────────────────────────────────────────────────
+
+# Messages shown to the user for each status
+STATUS_MESSAGES = {
+    "searching":      "Looking for Muse headset... Make sure BlueMuse is streaming.",
+    "waiting_signal": "Headset found. Waiting for a clean EEG signal, check the headband fit.",
+    "connected":      "EEG is being recorded.",
+    "no_device":      "No EEG headset found. This session will be recorded without EEG, and the report will say so.",
+    "error":          "EEG could not be started.",
+}
+SIGNAL_LOST_SEC = 10   # 'connected' goes back to 'waiting_signal' if nothing was saved for this long
+
 
 class EEGStream:
     """
     Manages live Muse EEG & PPG acquisition for one session.
     No simulation — hardware only.
+
+    latest["status"]:
+      searching       looking for the LSL stream
+      waiting_signal  headset found but no clean snapshot saved yet (or none in the last 10 s)
+      connected       at least one snapshot is saved in EEG_Snapshots (snapshots_saved > 0)
+      no_device       no EEG stream found within 5 s (thread ends, nothing is written)
+      error           pylsl missing or the database could not be reached
     """
 
-    def __init__(self, session_id: int, db_conn):
+    def __init__(self, session_id: int):
         self.session_id     = session_id
-        self._conn          = db_conn
         self._thread        = None
         self._stop_event    = threading.Event()
         self._lock          = threading.Lock()
@@ -153,15 +176,30 @@ class EEGStream:
 
         # Live values read by WebSocket handler and Flutter app
         self.latest: dict = {
-            "connected":    False,
-            "alpha":        0.0,
-            "beta":         0.0,
-            "theta":        0.0,
-            "stress_index": 0.0,
-            "pulse_rate":   72,
-            "question_id":  None,
-            "question_num": None,
+            "status":         "searching",
+            "message":        STATUS_MESSAGES["searching"],
+            "connected":      False,      # True only when status == "connected"
+            "alpha":          None,
+            "beta":           None,
+            "theta":          None,
+            "stress_index":   None,
+            "pulse_rate":     None,       # None = no pulse measured
+            "question_id":    None,
+            "question_num":   None,
+            "snapshots_saved": 0,
+            "save_failures":  0,
         }
+
+    def _set_status(self, new_status: str, message: Optional[str] = None):
+        with self._lock:
+            self.latest["status"]    = new_status
+            self.latest["message"]   = message or STATUS_MESSAGES[new_status]
+            self.latest["connected"] = (new_status == "connected")
+
+    def get_latest(self) -> dict:
+        """A copy of the live values (safe to read from another thread)."""
+        with self._lock:
+            return dict(self.latest)
 
     def set_question(self, question_id: int, question_num: int):
         with self._lock:
@@ -169,6 +207,9 @@ class EEGStream:
             self._current_q_num = question_num
         logger.info("EEG marker set: session=%d q_id=%d q_num=%d",
                     self.session_id, question_id, question_num)
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self):
         self._stop_event.clear()
@@ -187,10 +228,16 @@ class EEGStream:
             from pylsl import StreamInlet, resolve_streams
         except ImportError:
             logger.error("pylsl not installed. Run: pip install pylsl")
+            self._set_status("error", "EEG software (pylsl) is not installed on the server.")
             return
 
         logger.info("Resolving real Muse LSL streams (EEG + PPG)...")
-        all_streams = resolve_streams(wait_time=5.0)
+        try:
+            all_streams = resolve_streams(wait_time=5.0)
+        except Exception as exc:
+            logger.error("LSL search failed for session %d (%s)", self.session_id, type(exc).__name__)
+            self._set_status("error", "EEG stream search failed.")
+            return
 
         eeg_inlet = None
         ppg_inlet = None
@@ -208,16 +255,35 @@ class EEGStream:
 
         if eeg_inlet is None:
             logger.warning("No real Muse EEG LSL stream found for session %d. Make sure BlueMuse is streaming.", self.session_id)
-            with self._lock:
-                self.latest["connected"] = False
+            self._set_status("no_device")
+            return          # nothing is written to the database
+
+        # This thread uses its own database connection and closes it when it ends.
+        try:
+            conn = get_connection()
+        except Exception as exc:
+            logger.error("EEG thread could not open the database for session %d (%s)",
+                         self.session_id, type(exc).__name__)
+            self._set_status("error", "EEG could not reach the database.")
             return
 
-        with self._lock:
-            self.latest["connected"] = True
+        self._set_status("waiting_signal")
+        try:
+            self._read_loop(conn, eeg_inlet, ppg_inlet)
+        finally:
+            conn.close()
+            try:
+                eeg_inlet.close_stream()
+                if ppg_inlet:
+                    ppg_inlet.close_stream()
+            except Exception:
+                pass
 
+    def _read_loop(self, conn, eeg_inlet, ppg_inlet):
         eeg_buffer: deque = deque(maxlen=BUFFER_SIZE)
         ppg_buffer: deque = deque(maxlen=256)
         last_snapshot = time.time()
+        last_saved = None     # time of the last snapshot that was really saved
 
         while not self._stop_event.is_set():
             # Pull EEG samples
@@ -238,8 +304,14 @@ class EEGStream:
                     # IR channel is index 1 (Muse PPG: ambient=0, IR=1, red=2)
                     ppg_buffer.append(float(sample[1] if len(sample) > 1 else sample[0]))
 
-            # Process snapshot every 2 seconds
             now = time.time()
+
+            # No clean snapshot saved for a while: stop showing "connected"
+            if last_saved is not None and now - last_saved > SIGNAL_LOST_SEC \
+                    and self.latest["status"] == "connected":
+                self._set_status("waiting_signal")
+
+            # Process snapshot every 2 seconds
             if now - last_snapshot >= SNAPSHOT_SEC and len(eeg_buffer) >= BUFFER_SIZE // 2:
                 last_snapshot = now
 
@@ -250,41 +322,34 @@ class EEGStream:
                     logger.warning("EEG session %d: not enough clean samples (too many artifacts)", self.session_id)
                     continue
 
-                # Extract real PPG heart rate
-                pulse = 72
+                # Real PPG heart rate, or None when it cannot be measured
+                pulse = None
                 if len(ppg_buffer) >= 64:
                     pulse = _extract_pulse(np.array(list(ppg_buffer), dtype=np.float64))
 
                 with self._lock:
                     q_id  = self._current_q_id
                     q_num = self._current_q_num
-                    self.latest.update({
-                        **result,
-                        "connected":    True,
-                        "pulse_rate":   pulse,
-                        "question_id":  q_id,
-                        "question_num": q_num,
-                    })
 
-                logger.info(
-                    "EEG snap session=%d α=%.2f β=%.2f θ=%.2f stress=%.2f HR=%d q=%s",
-                    self.session_id, result["alpha"], result["beta"],
-                    result["theta"], result["stress_index"], pulse, q_num
-                )
-                self._save_snapshot(result, pulse, q_id, q_num)
+                if self._save_snapshot(conn, result, pulse, q_id, q_num):
+                    last_saved = now
+                    with self._lock:
+                        self.latest.update({
+                            **result,
+                            "pulse_rate":   pulse,
+                            "question_id":  q_id,
+                            "question_num": q_num,
+                            "snapshots_saved": self.latest["snapshots_saved"] + 1,
+                        })
+                    self._set_status("connected")   # only after a snapshot is really saved
+                    logger.info("EEG snap saved session=%d stress=%.2f q=%s",
+                                self.session_id, result["stress_index"], q_num)
 
+    def _save_snapshot(self, conn, result: dict, pulse: Optional[int],
+                       q_id: Optional[int], q_num: Optional[int]) -> bool:
+        """Save EEG snapshot (+ PPG pulse when one was measured). Returns True if it was saved."""
         try:
-            eeg_inlet.close_stream()
-            if ppg_inlet:
-                ppg_inlet.close_stream()
-        except Exception:
-            pass
-
-    def _save_snapshot(self, result: dict, pulse: int,
-                       q_id: Optional[int], q_num: Optional[int]):
-        """Save EEG snapshot + PPG pulse to the database."""
-        try:
-            cursor = self._conn.cursor()
+            cursor = conn.cursor()
 
             # Save to EEG_Snapshots (processed bands + question marker)
             cursor.execute(
@@ -301,21 +366,27 @@ class EEGStream:
                  q_id, q_num)
             )
 
-            # Save PPG heart rate to SensorData (data_type must be 'ppg')
-            cursor.execute(
-                """INSERT INTO SensorData
-                   (session_id, pulse_rate, data_type, recorded_at)
-                   VALUES (?, ?, 'ppg', ?)""",
-                (self.session_id, pulse, datetime.now(timezone.utc))
-            )
+            # Save PPG heart rate to SensorData only when a pulse was really measured
+            if pulse is not None:
+                cursor.execute(
+                    """INSERT INTO SensorData
+                       (session_id, pulse_rate, data_type, recorded_at)
+                       VALUES (?, ?, 'ppg', ?)""",
+                    (self.session_id, pulse, datetime.now(timezone.utc))
+                )
 
-            self._conn.commit()
+            conn.commit()
+            return True
         except Exception as exc:
-            logger.error("Snapshot save failed: %s", exc)
+            # Log the session id and error type only (no values)
+            logger.error("Snapshot save failed for session %d (%s)", self.session_id, type(exc).__name__)
+            with self._lock:
+                self.latest["save_failures"] += 1
             try:
-                self._conn.rollback()
+                conn.rollback()
             except Exception:
                 pass
+            return False
 
 
 # ── Global registry ───────────────────────────────────────────────────────
@@ -323,14 +394,20 @@ _active_streams: dict[int, EEGStream] = {}
 _registry_lock = threading.Lock()
 
 
-def start_eeg_stream(session_id: int, db_conn) -> EEGStream:
+def start_eeg_stream(session_id: int) -> EEGStream:
+    """Start (or return) the EEG stream of this session. One headset = one active session."""
     with _registry_lock:
-        if session_id in _active_streams:
-            return _active_streams[session_id]
-        stream = EEGStream(session_id, db_conn)
-        stream.start()
-        _active_streams[session_id] = stream
-        return stream
+        # Take every OTHER stream out of the registry while holding the lock ...
+        others = [_active_streams.pop(sid) for sid in list(_active_streams) if sid != session_id]
+        stream = _active_streams.get(session_id)
+        if stream is None or not stream.is_alive():     # a dead thread is replaced (Retry works)
+            stream = EEGStream(session_id)
+            stream.start()          # only spawns the thread, so it is safe under the lock
+            _active_streams[session_id] = stream
+    # ... and stop them (waits up to 5 s) after the lock is released
+    for old in others:
+        old.stop()
+    return stream
 
 
 def stop_eeg_stream(session_id: int):
@@ -341,7 +418,8 @@ def stop_eeg_stream(session_id: int):
 
 
 def get_eeg_stream(session_id: int) -> Optional[EEGStream]:
-    return _active_streams.get(session_id)
+    with _registry_lock:
+        return _active_streams.get(session_id)
 
 
 def mark_question(session_id: int, question_id: int, question_num: int):

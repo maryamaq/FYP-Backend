@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
 from database import get_connection, test_connection
-from routers import auth, sessions, questionnaire, sensors, results, psychologist, advisor, eeg
+from routers import auth, sessions, questionnaire, sensors, results, psychologist, advisor, eeg, appointments
 from websocket.eeg_handler import eeg_websocket_handler
 
 logging.basicConfig(
@@ -42,6 +42,15 @@ async def lifespan(app: FastAPI):
         logger.info("Database connection OK — SQL Server time: %s", row.now)
     except Exception as exc:
         logger.error("Database connection FAILED: %s", exc)
+
+    # Load the emotion model now, so a problem shows at start-up and the first camera frame is not slow.
+    try:
+        from deepface import DeepFace
+        DeepFace.build_model("Emotion")
+        logger.info("Emotion model ready")
+    except Exception as exc:
+        logger.error("Emotion model could NOT be loaded (%s). Face images will be rejected with 503.",
+                     type(exc).__name__)
 
     logger.info("=== Virtual Clinic Backend is READY ===")
     yield
@@ -71,10 +80,11 @@ app.include_router(results.router)
 app.include_router(psychologist.router)
 app.include_router(advisor.router)
 app.include_router(eeg.router)
+app.include_router(appointments.router)
 
 @app.websocket("/ws/eeg/{session_id}")
-async def websocket_eeg(websocket: WebSocket, session_id: int):
-    await eeg_websocket_handler(websocket=websocket, session_id=session_id)
+async def websocket_eeg(websocket: WebSocket, session_id: int, token: str = ""):
+    await eeg_websocket_handler(websocket=websocket, session_id=session_id, token=token)
 
 
 @app.get("/", tags=["Health"])
