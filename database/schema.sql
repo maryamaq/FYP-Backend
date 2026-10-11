@@ -1,15 +1,19 @@
-# ============================================================
-# database/schema.sql — SQL Server DDL for VirtualClinicDB
-#
-# Run this script ONCE to create all tables.
-# Execute in SQL Server Management Studio (SSMS):
-#   1. Connect to your local SQL Server instance
-#   2. Open a New Query window
-#   3. Paste this entire script and press F5
-#
-# Or run via sqlcmd:
-#   sqlcmd -S localhost -E -i schema.sql
-# ============================================================
+-- ============================================================
+-- database/schema.sql — SQL Server DDL for VirtualClinicDB
+--
+-- Run this script ONCE on an EMPTY server to create all tables.
+-- Execute in SQL Server Management Studio (SSMS):
+--   1. Connect to your local SQL Server instance
+--   2. Open a New Query window
+--   3. Paste this entire script and press F5
+--
+-- Or run via sqlcmd (-I is needed for the filtered indexes):
+--   sqlcmd -S localhost -E -I -i schema.sql
+--
+-- A fresh database built from this file has the same structure as the
+-- live database after database/demo_additions.sql was applied.
+-- (An existing database is upgraded with demo_additions.sql, not this file.)
+-- ============================================================
 
 -- Create and select the database
 IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'VirtualClinicDB')
@@ -32,11 +36,25 @@ BEGIN
         name        VARCHAR(100)  NOT NULL,
         email       VARCHAR(100)  NOT NULL UNIQUE,
         password    VARCHAR(255)  NOT NULL,   -- plaintext password
-        role        VARCHAR(20)   NOT NULL    -- 'student' | 'teacher' | 'psychologist'
-                    CHECK (role IN ('student', 'teacher', 'psychologist')),
+        role        VARCHAR(20)   NOT NULL    -- 'student' | 'teacher' | 'psychologist' | 'advisor'
+                    CHECK (role IN ('student', 'teacher', 'psychologist', 'advisor')),
         created_at  DATETIME      NOT NULL DEFAULT GETDATE()
     );
     PRINT 'Table Users created.';
+END
+GO
+
+-- ============================================================
+-- TABLE: Sections (a class section and its class advisor)
+-- ============================================================
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Sections')
+BEGIN
+    CREATE TABLE Sections (
+        section_id    INT IDENTITY(1,1) PRIMARY KEY,
+        section_name  VARCHAR(50) NOT NULL UNIQUE,
+        advisor_id    INT NOT NULL REFERENCES Users(user_id)
+    );
+    PRINT 'Table Sections created.';
 END
 GO
 
@@ -49,7 +67,8 @@ BEGIN
         student_id       INT IDENTITY(1,1) PRIMARY KEY,
         user_id          INT NOT NULL UNIQUE REFERENCES Users(user_id) ON DELETE CASCADE,
         cgpa_trend       FLOAT NOT NULL DEFAULT 0.0,   -- negative = declining GPA
-        attendance_drop  FLOAT NOT NULL DEFAULT 0.0    -- positive = more absences
+        attendance_drop  FLOAT NOT NULL DEFAULT 0.0,   -- positive = more absences
+        section_id       INT NULL REFERENCES Sections(section_id)
     );
     PRINT 'Table Students created.';
 END
@@ -88,6 +107,63 @@ END
 GO
 
 -- ============================================================
+-- TABLE: AdvisorNotifications (flag for the class advisor, Medium risk)
+-- ============================================================
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'AdvisorNotifications')
+BEGIN
+    CREATE TABLE AdvisorNotifications (
+        notification_id  INT IDENTITY(1,1) PRIMARY KEY,
+        advisor_id       INT           NOT NULL REFERENCES Users(user_id),
+        student_id       INT           NOT NULL REFERENCES Users(user_id),
+        session_id       INT           NOT NULL REFERENCES Sessions(session_id),
+        message          NVARCHAR(500) NOT NULL,
+        is_read          BIT           NULL DEFAULT 0,
+        created_at       DATETIME2     NULL DEFAULT GETUTCDATE()
+    );
+    PRINT 'Table AdvisorNotifications created.';
+END
+GO
+
+-- ============================================================
+-- TABLE: SensorData (pulse/PPG and blood-pressure readings; real readings only)
+-- ============================================================
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'SensorData')
+BEGIN
+    CREATE TABLE SensorData (
+        sensor_id    INT IDENTITY(1,1) PRIMARY KEY,
+        session_id   INT         NOT NULL REFERENCES Sessions(session_id),
+        data_type    VARCHAR(20) NOT NULL CHECK (data_type IN ('eeg', 'bp', 'ppg')),
+        eeg_value    FLOAT       NULL,
+        bp_systolic  INT         NULL,
+        bp_diastolic INT         NULL,
+        pulse_rate   INT         NULL,
+        recorded_at  DATETIME    NOT NULL DEFAULT GETDATE()
+    );
+    PRINT 'Table SensorData created.';
+END
+GO
+
+-- ============================================================
+-- TABLE: EEG_Snapshots (band powers + stress index, one row per EEG window)
+-- ============================================================
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'EEG_Snapshots')
+BEGIN
+    CREATE TABLE EEG_Snapshots (
+        snapshot_id   INT IDENTITY(1,1) PRIMARY KEY,
+        session_id    INT      NOT NULL REFERENCES Sessions(session_id),
+        recorded_at   DATETIME NOT NULL DEFAULT GETDATE(),
+        alpha_power   FLOAT    NOT NULL DEFAULT 0,
+        beta_power    FLOAT    NOT NULL DEFAULT 0,
+        theta_power   FLOAT    NOT NULL DEFAULT 0,
+        stress_index  FLOAT    NOT NULL DEFAULT 0,
+        question_id   INT      NULL,
+        question_num  INT      NULL
+    );
+    PRINT 'Table EEG_Snapshots created.';
+END
+GO
+
+-- ============================================================
 -- TABLE: Q_Stages
 -- ============================================================
 IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Q_Stages')
@@ -116,6 +192,31 @@ BEGIN
         weight        FLOAT         NOT NULL DEFAULT 1.0
     );
     PRINT 'Table Q_Questions created.';
+END
+GO
+
+-- ============================================================
+-- TABLE: QuestionFeedback (psychologist opinion on one question)
+-- Stored for later review of the questionnaire weights. Nothing in the
+-- code changes Q_Questions.weight or the stage weights from this table.
+-- ============================================================
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'QuestionFeedback')
+BEGIN
+    CREATE TABLE QuestionFeedback (
+        feedback_id      INT IDENTITY(1,1) PRIMARY KEY,
+        psychologist_id  INT           NOT NULL REFERENCES Users(user_id),
+        question_id      INT           NOT NULL REFERENCES Q_Questions(question_id),
+        usefulness_score INT           NOT NULL CHECK (usefulness_score BETWEEN 1 AND 5),
+        created_at       DATETIME      NOT NULL DEFAULT GETDATE(),
+        usefulness_label VARCHAR(20)   NULL,   -- 'useful' | 'less_useful' | 'irrelevant'
+        comments         NVARCHAR(500) NULL,
+        session_id       INT           NULL,
+        updated_at       DATETIME      NULL,
+        CONSTRAINT FK_QuestionFeedback_session FOREIGN KEY (session_id) REFERENCES Sessions(session_id),
+        CONSTRAINT CK_QuestionFeedback_label
+            CHECK (usefulness_label IS NULL OR usefulness_label IN ('useful', 'less_useful', 'irrelevant'))
+    );
+    PRINT 'Table QuestionFeedback created.';
 END
 GO
 
@@ -154,7 +255,11 @@ BEGIN
         surprise          FLOAT        NOT NULL DEFAULT 0.0,
         disgust           FLOAT        NOT NULL DEFAULT 0.0,
         neutral           FLOAT        NOT NULL DEFAULT 0.0,
-        captured_at       DATETIME     NOT NULL DEFAULT GETDATE()
+        captured_at       DATETIME     NOT NULL DEFAULT GETDATE(),
+        image_path        VARCHAR(260) NULL,   -- saved face image (file name inside emotion_images)
+        stage_number      INT          NULL,   -- questionnaire stage when the image was taken
+        question_id       INT          NULL,
+        CONSTRAINT FK_FacialEmotions_question FOREIGN KEY (question_id) REFERENCES Q_Questions(question_id)
     );
     PRINT 'Table FacialEmotions created.';
 END
@@ -184,59 +289,72 @@ BEGIN
                               'Healthy', 'Mild Stress',
                               'Moderate Risk', 'High Risk', 'Critical Risk'
                           )),
-        calculated_at     DATETIME     NOT NULL DEFAULT GETDATE()
+        calculated_at     DATETIME     NOT NULL DEFAULT GETDATE(),
+        questionnaire_score FLOAT      NULL,   -- weighted questionnaire score (0-4)
+        physio_score        FLOAT      NULL,   -- NULL = no physiological signal was measured
+        missing_modalities  VARCHAR(100) NULL  -- comma list (eeg,face,hr,bp); '' = complete; NULL = saved before this check existed
     );
     PRINT 'Table MH_Results created.';
 END
 GO
 
 -- ============================================================
--- TABLE: SessionBP
+-- TABLE: Appointments (High / Critical risk -> psychologist booking)
 -- ============================================================
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'SessionBP')
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Appointments')
 BEGIN
-    CREATE TABLE SessionBP (
-        bp_id INT IDENTITY(1,1) PRIMARY KEY,
-        session_id INT NOT NULL FOREIGN KEY REFERENCES Sessions(session_id),
-        baseline_sys INT,
-        baseline_dia INT,
-        baseline_pulse INT,
-        baseline_time DATETIME2,
-        after_sys INT,
-        after_dia INT,
-        after_pulse INT,
-        after_time DATETIME2,
-        delta_sys INT,
-        delta_dia INT,
-        delta_pulse INT
+    CREATE TABLE Appointments (
+        appointment_id  INT IDENTITY(1,1) PRIMARY KEY,
+        student_id      INT         NOT NULL REFERENCES Users(user_id),
+        psychologist_id INT         NOT NULL REFERENCES Users(user_id),
+        session_id      INT         NOT NULL REFERENCES Sessions(session_id),
+        status          VARCHAR(20) NOT NULL DEFAULT 'Scheduled',
+        created_at      DATETIME    NOT NULL DEFAULT GETDATE(),
+        CONSTRAINT CK_Appointments_status CHECK (status IN ('Scheduled', 'Completed', 'Cancelled'))
     );
-    PRINT 'Table SessionBP created.';
+    PRINT 'Table Appointments created.';
 END
 GO
 
--- ============================================================
--- TABLE: WindowAnalysis
--- ============================================================
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WindowAnalysis')
+-- One Scheduled appointment per session (stops double booking)
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_Appointments_session_scheduled')
 BEGIN
-    CREATE TABLE WindowAnalysis (
-        window_id INT IDENTITY(1,1) PRIMARY KEY,
-        session_id INT NOT NULL FOREIGN KEY REFERENCES Sessions(session_id),
-        window_start DATETIME2 NOT NULL,
-        window_end DATETIME2 NOT NULL,
-        eeg_delta FLOAT,
-        eeg_theta FLOAT,
-        eeg_alpha FLOAT,
-        eeg_beta FLOAT,
-        eeg_gamma FLOAT,
-        stress_index FLOAT,
-        ppg_hr FLOAT,
-        emotion_distress FLOAT,
-        questionnaire_score FLOAT,
-        window_risk FLOAT
-    );
-    PRINT 'Table WindowAnalysis created.';
+    CREATE UNIQUE INDEX UX_Appointments_session_scheduled
+        ON Appointments (session_id) WHERE status = 'Scheduled';
+    PRINT 'Index UX_Appointments_session_scheduled created.';
 END
+GO
+
+-- One feedback row per psychologist and question
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_QuestionFeedback_psychologist_question')
+BEGIN
+    CREATE UNIQUE INDEX UX_QuestionFeedback_psychologist_question
+        ON QuestionFeedback (psychologist_id, question_id);
+    PRINT 'Index UX_QuestionFeedback_psychologist_question created.';
+END
+GO
+
+-- Summary of psychologist feedback per question (read-only helper for reviewing weights)
+CREATE OR ALTER VIEW vw_QuestionFeedbackSummary AS
+SELECT q.question_id, q.stage_id, q.question_text, q.weight,
+       COUNT(f.feedback_id) AS feedback_count,
+       AVG(CAST(f.usefulness_score AS FLOAT)) AS avg_score,
+       SUM(CASE WHEN f.label = 'useful' THEN 1 ELSE 0 END) AS useful_count,
+       SUM(CASE WHEN f.label = 'less_useful' THEN 1 ELSE 0 END) AS less_useful_count,
+       SUM(CASE WHEN f.label = 'irrelevant' THEN 1 ELSE 0 END) AS irrelevant_count
+FROM Q_Questions q
+LEFT JOIN (
+    SELECT feedback_id, question_id, usefulness_score,
+           COALESCE(usefulness_label,
+                    CASE WHEN usefulness_score >= 4 THEN 'useful'
+                         WHEN usefulness_score >= 2 THEN 'less_useful'
+                         ELSE 'irrelevant' END) AS label
+    FROM QuestionFeedback
+) f ON f.question_id = q.question_id
+GROUP BY q.question_id, q.stage_id, q.question_text, q.weight;
 GO
 
 -- ============================================================
